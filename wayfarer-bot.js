@@ -2,7 +2,23 @@ const { chromium } = require('playwright');
 const path = require('path');
 const os = require('os');
 
-const URL = 'https://wayfarer.nianticlabs.com/';
+const URL = 'https://wayfarer.scopely.com/new/review';
+
+// ============================================================
+// CONFIGURAÇÕES DE TEMPO (em milissegundos)
+// Aumente esses valores se a página estiver lenta ou o bot
+// estiver clicando muito rápido e perdendo botões.
+// ============================================================
+const TIMING = {
+  CLICK_DELAY:      700,   // pausa depois de cada clique em botão de resposta
+  CATEGORY_DELAY:    700,   // pausa entre categorias (Sim/Não)
+  MODAL_DELAY:       700,   // pausa para modal renderizar
+  QUESTION_DELAY:   700,   // pausa entre responder uma pergunta e a próxima
+  MODAL_AFTER:       400,   // pausa depois de fechar um modal
+  PAGE_LOAD_DELAY:  3000,   // espera inicial da página carregar
+  REVIEW_INTERVAL: 15000,   // espera quando não há avaliações para revisar
+  ERROR_RECOVERY:   5000,   // pausa depois de erro no loop
+};
 
 let browser;
 let page;
@@ -13,129 +29,102 @@ async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Map question keywords → preferred answer
+const ANSWER_MAP = {
+  'apropriado': 'positive',
+  'adequada': 'positive',
+  'adequado': 'positive',
+  'socializar': 'positive',
+  'seguro': 'unknown',
+  'exatid': 'unknown',
+  'permanente': 'unknown',
+  'distinto': 'unknown',
+  'explorar': 'unknown',
+  'exercí': 'negative',
+};
+
 async function clickAnswerForCriteria(kw, prefer) {
   try {
-    // Find all visible buttons that look like answer buttons
-    const allBtns = await page.locator('button:visible').all();
-
-    // Find buttons by text content (XPath normalize-space)
-    const positivoBtn = page.locator(`button:has-text("Positivo")`).first();
-    const negativoBtn = page.locator(`button:has-text("Negativo")`).first();
-    const naoSeiBtn = page.locator(`button:has-text("NÃO SEI")`).first();
-
-    // Get Y and X positions of answer buttons
-    const answers = [];
-    if (await positivoBtn.count() > 0) {
-      const box = await positivoBtn.boundingBox().catch(() => null);
-      if (box) answers.push({ label: 'positivo', y: box.y, x: box.x, btn: positivoBtn });
-    }
-    if (await negativoBtn.count() > 0) {
-      const box = await negativoBtn.boundingBox().catch(() => null);
-      if (box) answers.push({ label: 'negativo', y: box.y, x: box.x, btn: negativoBtn });
-    }
-    if (await naoSeiBtn.count() > 0) {
-      const box = await naoSeiBtn.boundingBox().catch(() => null);
-      if (box) answers.push({ label: 'não sei', y: box.y, x: box.x, btn: naoSeiBtn });
-    }
-
-    if (answers.length === 0) {
-      // Fallback: check aria-label
-      const thumbUpBtn = page.locator(`button[aria-label*="up"], button[aria-label*="positivo"]`).first();
-      const thumbDownBtn = page.locator(`button[aria-label*="down"], button[aria-label*="negativo"]`).first();
-      const nsBtn = page.locator(`button[aria-label*="sei"]`).first();
-
-      const answers2 = [];
-      if (await thumbUpBtn.count() > 0) {
-        const box = await thumbUpBtn.boundingBox().catch(() => null);
-        if (box) answers2.push({ label: 'positivo', y: box.y, x: box.x, btn: thumbUpBtn });
-      }
-      if (await thumbDownBtn.count() > 0) {
-        const box = await thumbDownBtn.boundingBox().catch(() => null);
-        if (box) answers2.push({ label: 'negativo', y: box.y, x: box.x, btn: thumbDownBtn });
-      }
-      if (await nsBtn.count() > 0) {
-        const box = await nsBtn.boundingBox().catch(() => null);
-        if (box) answers2.push({ label: 'não sei', y: box.y, x: box.x, btn: nsBtn });
-      }
-
-      if (answers2.length > 0) answers.push(...answers2);
-    }
-
-    if (answers.length === 0) return false;
-
-    // Find the question heading by keyword
     const kwLower = kw.toLowerCase();
-    const headingEls = page.locator(`*`).filter({ hasText: new RegExp(`^${kw}$`, 'i') });
-    let headingBox = null;
-    for (let i = 0; i < await headingEls.count(); i++) {
-      const el = headingEls.nth(i);
-      const box = await el.boundingBox().catch(() => null);
-      if (box && box.width > 10 && box.height > 10) {
-        headingBox = box;
-        break;
-      }
-    }
 
-    if (!headingBox) {
-      // Try partial match
-      const headingEls2 = page.locator(`*`).filter({ hasText: new RegExp(kw, 'i') });
-      for (let i = 0; i < Math.min(await headingEls2.count(), 50); i++) {
-        const el = headingEls2.nth(i);
-        const box = await el.boundingBox().catch(() => null);
-        const text = await el.textContent().catch(() => '');
-        if (box && text.toLowerCase().includes(kwLower)) {
-          headingBox = box;
-          break;
+    // Strategy: Each wf-question-card has .question-title + .action-buttons-row.
+    // Iterate all question cards and find the one matching the keyword.
+    const cards = await page.locator('.wf-question-card').all();
+
+    for (const card of cards) {
+      try {
+        // Get the question title within this card
+        const titleEl = card.locator('.question-title').first();
+        const titleCount = await titleEl.count();
+        if (titleCount === 0) continue;
+
+        const titleText = (await titleEl.textContent()).trim().toLowerCase();
+        if (!titleText.includes(kwLower)) continue;
+
+        // Found the matching card — get its action buttons
+        const row = card.locator('.action-buttons-row').first();
+        const rowCount = await row.count();
+        if (rowCount === 0) continue;
+
+        const rowBtns = await row.locator('button').all();
+        let positivoBtn = null;
+        let negativoBtn = null;
+        let naoSeiBtn = null;
+
+        for (const btn of rowBtns) {
+          try {
+            const disabled = await btn.isDisabled();
+            if (disabled) continue;
+
+            const cls = await btn.getAttribute('class') || '';
+
+            if (cls.includes('dont-know-button')) {
+              naoSeiBtn = btn;
+              continue;
+            }
+
+            const matIcon = btn.locator('mat-icon');
+            if (await matIcon.count() > 0) {
+              const iconText = (await matIcon.textContent()).trim();
+              if (iconText === 'thumb_up') positivoBtn = btn;
+              else if (iconText === 'thumb_down') negativoBtn = btn;
+            }
+          } catch {}
         }
-      }
+
+        const targetLabel = prefer === 'positive' ? 'positivo' :
+                            prefer === 'negative' ? 'negativo' : 'não sei';
+
+        let targetBtn = null;
+        if (targetLabel === 'positivo') targetBtn = positivoBtn;
+        else if (targetLabel === 'negativo') targetBtn = negativoBtn;
+        else targetBtn = naoSeiBtn;
+
+        if (!targetBtn) continue;
+
+        // Check if already selected (aria-pressed or is-selected class)
+        const ariaPressed = await targetBtn.getAttribute('aria-pressed').catch(() => 'false');
+        const cls = await targetBtn.getAttribute('class').catch(() => '');
+        const alreadySelected = ariaPressed === 'true' || cls.includes('is-selected');
+
+        if (alreadySelected) {
+          // Already answered — skip silently, don't re-click
+          return true;
+        }
+
+        await targetBtn.click({ timeout: 5000 });
+        return true;
+
+      } catch {}
     }
-
-    if (!headingBox) return false;
-
-    // Group answers by Y row (each question has 3 answer buttons)
-    // Sort answers by Y then X
-    answers.sort((a, b) => a.y - b.y || a.x - b.x);
-
-    // Find which answer row is closest to the heading
-    let targetAnswer = null;
-    let minDist = Infinity;
-
-    for (const a of answers) {
-      const dist = Math.abs(a.y - headingBox.y);
-      if (dist < minDist) {
-        minDist = dist;
-        targetAnswer = a;
-      }
-    }
-
-    if (minDist > 250) return false; // too far
-
-    // Get the full row of 3 buttons (same Y ± 5px)
-    const rowY = targetAnswer.y;
-    const rowBtns = [];
-    for (const a of answers) {
-      if (Math.abs(a.y - rowY) < 5) {
-        rowBtns.push(a);
-      }
-    }
-    rowBtns.sort((a, b) => a.x - b.x); // left to right
-
-    // Map: 0=Positivo, 1=Negativo, 2=NÃO SEI
-    const targetLabel = prefer === 'positive' ? 'positivo' :
-                        prefer === 'negative' ? 'negativo' : 'não sei';
-
-    const target = rowBtns.find(a => a.label === targetLabel);
-    if (target) {
-      await target.btn.click({ timeout: 3000 });
-      return true;
-    }
-  } catch {}
-
+  } catch (e) {
+    console.log(`  [ERR clickAnswerForCriteria] ${e.message}`);
+  }
   return false;
 }
 
 async function handleModal() {
-  await sleep(600);
+  await sleep(TIMING.MODAL_DELAY);
 
   let modal = page.locator('[role="dialog"], [role="alertdialog"]');
   modal = modal.filter({ isVisible: true });
@@ -160,7 +149,7 @@ async function handleModal() {
     } else {
       await page.keyboard.press('Escape');
     }
-    await sleep(400);
+    await sleep(TIMING.MODAL_AFTER);
     return;
   }
 
@@ -183,7 +172,7 @@ async function handleModal() {
         }
       }
     }
-    await sleep(400);
+    await sleep(TIMING.MODAL_AFTER);
     const confirmBtn = modal.locator('button').filter({ hasText: /confirmar|continuar|ok/i }).first();
     if (await confirmBtn.isVisible().catch(() => false)) {
       await confirmBtn.click({ timeout: 3000 }).catch(() => {});
@@ -191,12 +180,12 @@ async function handleModal() {
     } else {
       await page.keyboard.press('Enter').catch(() => {});
     }
-    await sleep(400);
+    await sleep(TIMING.MODAL_AFTER);
     return;
   }
 
   // Any other modal — close
-  await sleep(400);
+  await sleep(TIMING.MODAL_AFTER);
   const closeBtn = modal.locator('button').first();
   if (await closeBtn.isVisible().catch(() => false)) {
     await closeBtn.click({ timeout: 3000 }).catch(() => {});
@@ -218,61 +207,175 @@ async function clickSubmit() {
 async function evaluateWayspot() {
   console.log('[Wayspot] Avaliando...');
 
-  const criteria = [
-    { kw: 'apropriado', prefer: 'positive' },
-    { kw: 'apropriada', prefer: 'positive' },
-    { kw: 'adequada', prefer: 'positive' },
-    { kw: 'adequado', prefer: 'positive' },
-    { kw: 'seguro', prefer: 'unknown' },
-    { kw: 'exatid', prefer: 'unknown' },
-    { kw: 'permanente', prefer: 'unknown' },
-    { kw: 'distinto', prefer: 'unknown' },
-    { kw: 'socializar', prefer: 'positive' },
-    { kw: 'exercí', prefer: 'negative' },
-    { kw: 'explorar', prefer: 'unknown' },
-  ];
+  // Collect all question cards on the page (in DOM order)
+  const cards = await page.locator('.wf-question-card').all();
+  console.log(`  [INFO] ${cards.length} perguntas encontradas`);
 
-  for (const crit of criteria) {
-    const found = await clickAnswerForCriteria(crit.kw, crit.prefer);
-    const label = crit.prefer === 'positive' ? 'Positivo' : crit.prefer === 'negative' ? 'Negativo' : 'Não sei';
-    if (found) {
-      console.log(`  [OK] ${crit.kw} → ${label}`);
-    } else {
-      console.log(`  [!!] ${crit.kw} não encontrado`);
-    }
-
-    // Handle modals that may appear after clicking an answer
-    await handleModal();
-    await handleModal();
-
-    await sleep(600);
+  if (cards.length === 0) {
+    console.log('  [!!] Nenhum card de pergunta encontrado');
+    return;
   }
 
-  // Category SIM buttons (0 to 3)
-  await sleep(500);
+  let answered = 0;
+  let skipped = 0;
+
+  for (let i = 0; i < cards.length; i++) {
+    const card = cards[i];
+    try {
+      const titleEl = await card.locator('.question-title').first();
+      const titleText = (await titleEl.textContent().catch(() => '')).trim();
+
+      // Determine answer based on keyword match (partial match)
+      const titleLower = titleText.toLowerCase();
+      let prefer = ANSWER_MAP[titleLower];
+      if (!prefer) {
+        // Try partial keyword match (e.g. "Permanente e distinto" → "permanente")
+        for (const kw of Object.keys(ANSWER_MAP)) {
+          if (titleLower.includes(kw)) {
+            prefer = ANSWER_MAP[kw];
+            break;
+          }
+        }
+      }
+      if (!prefer) {
+        // No rule for this question type — skip
+        console.log(`  [--] "${titleText}" — sem regra, ignorado`);
+        skipped++;
+        continue;
+      }
+
+      const label = prefer === 'positive' ? 'Positivo' :
+                    prefer === 'negative' ? 'Negativo' : 'Não sei';
+
+      // Get the action buttons within this card
+      const row = await card.locator('.action-buttons-row').first();
+      const rowBtns = await row.locator('button').all();
+
+      let positivoBtn = null;
+      let negativoBtn = null;
+      let naoSeiBtn = null;
+
+      for (const btn of rowBtns) {
+        try {
+          const disabled = await btn.isDisabled();
+          if (disabled) continue;
+
+          const cls = await btn.getAttribute('class') || '';
+
+          if (cls.includes('dont-know-button')) {
+            naoSeiBtn = btn;
+            continue;
+          }
+
+          const matIcon = btn.locator('mat-icon');
+          if (await matIcon.count() > 0) {
+            const iconText = (await matIcon.textContent()).trim();
+            if (iconText === 'thumb_up') positivoBtn = btn;
+            else if (iconText === 'thumb_down') negativoBtn = btn;
+          }
+        } catch {}
+      }
+
+      let targetBtn = null;
+      if (prefer === 'positive') targetBtn = positivoBtn;
+      else if (prefer === 'negative') targetBtn = negativoBtn;
+      else targetBtn = naoSeiBtn;
+
+      if (!targetBtn) {
+        console.log(`  [!!] "${titleText}" — botão não encontrado`);
+        continue;
+      }
+
+      // Check if already selected
+      const ariaPressed = await targetBtn.getAttribute('aria-pressed').catch(() => 'false');
+      const clsAttr = await targetBtn.getAttribute('class').catch(() => '');
+      const alreadySelected = ariaPressed === 'true' || clsAttr.includes('is-selected');
+
+      if (alreadySelected) {
+        console.log(`  [==] "${titleText}" — já respondido (skip)`);
+        answered++;
+        continue;
+      }
+
+      await targetBtn.click({ timeout: 5000 });
+      console.log(`  [OK] "${titleText}" → ${label}`);
+      answered++;
+
+      // Wait for Angular re-render + modal handling
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
+      await sleep(TIMING.CLICK_DELAY);
+      await handleModal();
+      await handleModal();
+
+      // Special: "Exatidão" — checkboxes são opcionais, apenas marcar "Não sei"
+      // (NEEDS_SUPPLEMENTARY removido — não preenchemos mais os checkboxes)
+
+    } catch (e) {
+      console.log(`  [!!] Card #${i} — ${e.message}`);
+    }
+  }
+
+  console.log(`  [RESUMO] Respondidas: ${answered}, Ignoradas: ${skipped}`);
+
+  // Category SIM buttons — each category is a separate mat-button-toggle-group with Sim/Não
+  await sleep(TIMING.QUESTION_DELAY);
   let simClicked = 0;
 
-  for (let safety = 0; safety < 10; safety++) {
-    // Re-fetch buttons each time
-    const simBtns = await page.locator('button:visible').filter({ hasText: /^sim$/i }).all();
-    const simBtnsEnabled = [];
-    for (const btn of simBtns) {
-      const disabled = await btn.isDisabled().catch(() => true);
-      if (!disabled) simBtnsEnabled.push(btn);
-    }
+  // Iterate each mat-button-toggle-group separately to handle 1, 2, or 3 categories
+  const groups = await page.locator('mat-button-toggle-group').all();
 
-    if (simBtnsEnabled.length === 0) break;
-
-    await simBtnsEnabled[0].click({ timeout: 3000 });
-    simClicked++;
-    console.log(`  [OK] Categoria #${simClicked} = SIM`);
-    await sleep(800);
+  // Filter only groups that look like categories (contain a Sim/Não button and a label)
+  const categoryGroups = [];
+  for (const g of groups) {
+    try {
+      const visible = await g.isVisible();
+      if (!visible) continue;
+      const btns = await g.locator('button').all();
+      let hasSim = false;
+      for (const b of btns) {
+        const text = (await b.textContent().catch(() => '')).trim().toLowerCase();
+        if (text === 'sim') { hasSim = true; break; }
+      }
+      if (hasSim) categoryGroups.push(g);
+    } catch {}
   }
 
-  if (simClicked === 0) console.log('  [--] Sem categoria extra');
+  console.log(`  [INFO] ${categoryGroups.length} categorias para revisar`);
+
+  for (const group of categoryGroups) {
+    try {
+      // Find the Sim button inside this group
+      const simBtn = group.locator('button').filter({ hasText: /^sim$/i }).first();
+      const count = await simBtn.count();
+      if (count === 0) continue;
+
+      const visible = await simBtn.isVisible().catch(() => false);
+      if (!visible) continue;
+
+      // Check if already pressed
+      const ariaPressed = await simBtn.getAttribute('aria-pressed').catch(() => 'false');
+      if (ariaPressed === 'true') continue; // already answered
+
+      const disabled = await simBtn.isDisabled().catch(() => true);
+      if (disabled) continue;
+
+      // Get the category name (label inside the group, not Sim/Não)
+      const labelEl = group.locator('.text-orange-500, [class*="orange"], div').filter({ hasText: /^(?!sim|não)/i }).first();
+      const catName = (await labelEl.textContent().catch(() => '')).trim();
+
+      await simBtn.click({ timeout: 3000 });
+      simClicked++;
+      console.log(`  [OK] Categoria #${simClicked} "${catName}" = SIM`);
+      await sleep(TIMING.CATEGORY_DELAY);
+    } catch (e) {
+      console.log(`  [!!] Categoria: ${e.message}`);
+    }
+  }
+
+  if (simClicked === 0) console.log('  [--] Sem categoria extra (ou todas já marcadas)');
 
   // Submit
-  await sleep(500);
+  await sleep(TIMING.MODAL_AFTER);
   const sent = await clickSubmit();
   if (sent) {
     console.log('  [OK] ENVIAR clicado!');
@@ -400,10 +503,40 @@ async function runBot() {
   });
   page.setDefaultTimeout(15000);
 
-  await page.goto(URL);
-  await page.waitForLoadState('networkidle').catch(() => {});
-  console.log('[INFO] Página aberta. Faça login se necessário.');
-  console.log('[INFO] Depois digite "start" para iniciar.\n');
+  // Open browser on the review URL (or any wayfarer page)
+  console.log(`[INFO] Abrindo ${URL}...`);
+  await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  await sleep(TIMING.PAGE_LOAD_DELAY);
+
+  // Wait for any redirect or login flow to settle
+  let attempts = 0;
+  while (attempts < 10) {
+    const cur = page.url();
+    const onWayfarer = cur.includes('wayfarer.scopely.com') || cur.includes('wayfarer.nianticlabs.com');
+    if (onWayfarer) break;
+
+    // If we're on a Google/auth page, give user time to log in
+    if (cur.includes('accounts.google') || cur.includes('signin') || cur.includes('login')) {
+      console.log('[INFO] Aguardando login...');
+      await sleep(TIMING.PAGE_LOAD_DELAY);
+      attempts++;
+      continue;
+    }
+    break;
+  }
+
+  // After login (or if already logged in), navigate to review page
+  const currentUrl = page.url();
+  if (currentUrl.includes('wayfarer') && !currentUrl.includes('/new/review')) {
+    console.log('[INFO] Navegando para página de avaliação...');
+    await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
+    await sleep(TIMING.PAGE_LOAD_DELAY);
+  }
+
+  console.log('[INFO] Página de avaliação pronta.');
+  console.log('[INFO] Digite "start" para iniciar.\n');
 
   const rl = require('readline').createInterface({
     input: process.stdin,
@@ -445,16 +578,16 @@ async function runBot() {
       try {
         const ok = await evaluateCurrentPage();
         if (!ok) {
-          console.log('[INFO] Sem avaliações. Aguardando 15s...');
-          await sleep(15000);
+          console.log(`[INFO] Sem avaliações. Aguardando ${TIMING.REVIEW_INTERVAL / 1000}s...`);
+          await sleep(TIMING.REVIEW_INTERVAL);
         } else {
           console.log('[INFO] Aguardando recarregar...');
           await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-          await sleep(2000);
+          await sleep(TIMING.PAGE_LOAD_DELAY);
         }
       } catch (e) {
         console.log(`[ERRO] ${e.message}`);
-        await sleep(5000);
+        await sleep(TIMING.ERROR_RECOVERY);
       }
 
       if (shouldStop) {
