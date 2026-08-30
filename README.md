@@ -5,6 +5,18 @@ faz login na conta e avalia Wayspots de acordo com as regras configuradas.
 
 ---
 
+# Resultados
+
+<div align="center">
+<em>Dia 1</em> &nbsp;&nbsp;&nbsp;&nbsp; <em>Dia 2</em>
+<br>
+<img src="img/day_1.jpg" width="30%" />
+<img src="img/day_2.jpg" width="30%" />
+
+</div>
+
+---
+
 ## Instalação
 
 ```bash
