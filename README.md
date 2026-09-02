@@ -8,10 +8,12 @@ faz login na conta e avalia Wayspots de acordo com as regras configuradas.
 # Resultados
 
 <div align="center">
-<em>Dia 1</em> &nbsp;&nbsp;&nbsp;&nbsp; <em>Dia 2</em>
+<em>Dia 1</em> &nbsp;&nbsp;&nbsp;&nbsp; <em>Dia 2</em> &nbsp;&nbsp;&nbsp;&nbsp; <em>Dia 3</em> &nbsp;&nbsp;&nbsp;&nbsp; <em>Dia 4</em>
 <br>
-<img src="img/day_1.jpg" width="30%" />
-<img src="img/day_2.jpg" width="30%" />
+<img src="img/day_1.jpg" width="20%" />
+<img src="img/day_2.jpg" width="20%" />
+<img src="img/day_3.jpg" width="20%" />
+<img src="img/day_4.jpg" width="20%" />
 
 </div>
 
